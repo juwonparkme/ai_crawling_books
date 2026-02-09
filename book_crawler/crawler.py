@@ -185,20 +185,74 @@ def _extract_metadata(text: str, fallback_title: str) -> dict:
     }
 
 
-def _find_pdf_candidates(driver) -> List[str]:
+def _find_pdf_candidates(driver) -> List[dict]:
     by_module = importlib.import_module("selenium.webdriver.common.by")
     By = by_module.By
 
-    urls: List[str] = []
+    candidates: List[dict] = []
     anchors = driver.find_elements(By.CSS_SELECTOR, "a")
     for anchor in anchors:
         href = anchor.get_attribute("href") or ""
         text = (anchor.text or "").lower()
         if not href:
             continue
-        if ".pdf" in href.lower() or "pdf" in text:
-            urls.append(href)
-    return list(dict.fromkeys(urls))
+        href_lower = href.lower()
+        direct_pdf = href_lower.endswith(".pdf") or ".pdf" in href_lower
+        hinted_pdf = "pdf" in text
+        if direct_pdf or hinted_pdf:
+            candidates.append(
+                {
+                    "url": href,
+                    "direct_pdf": direct_pdf,
+                    "hinted_pdf": hinted_pdf,
+                }
+            )
+    deduped = {}
+    for item in candidates:
+        key = item["url"].lower()
+        if key in deduped:
+            continue
+        deduped[key] = item
+    return list(deduped.values())
+
+
+def _follow_pdf_hints(driver, config: CrawlerConfig, candidates: List[dict]) -> List[str]:
+    by_module = importlib.import_module("selenium.webdriver.common.by")
+    support_module = importlib.import_module("selenium.webdriver.support")
+    ui_module = importlib.import_module("selenium.webdriver.support.ui")
+    By = by_module.By
+    EC = support_module.expected_conditions
+    WebDriverWait = ui_module.WebDriverWait
+
+    found: List[str] = []
+    follow_limit = 3
+    followed = 0
+
+    for item in candidates:
+        if followed >= follow_limit:
+            break
+        if item.get("direct_pdf"):
+            continue
+        if not item.get("hinted_pdf"):
+            continue
+        url = item.get("url")
+        if not url:
+            continue
+        try:
+            driver.get(url)
+            WebDriverWait(driver, config.timeout).until(
+                EC.presence_of_element_located((By.TAG_NAME, "body"))
+            )
+            _random_delay(config)
+            nested = _find_pdf_candidates(driver)
+            for nested_item in nested:
+                if nested_item.get("direct_pdf"):
+                    found.append(nested_item["url"])
+        except Exception:
+            continue
+        followed += 1
+
+    return list(dict.fromkeys(found))
 
 
 def analyze_result(driver, config: CrawlerConfig, result: SearchResult) -> dict:
@@ -222,6 +276,10 @@ def analyze_result(driver, config: CrawlerConfig, result: SearchResult) -> dict:
             text = _collect_page_text(driver)
             metadata = _extract_metadata(text, result.title)
             candidates = _find_pdf_candidates(driver)
+            hinted_urls = _follow_pdf_hints(driver, config, candidates)
+            candidate_urls = [item["url"] for item in candidates]
+            candidate_urls.extend(hinted_urls)
+            candidate_urls = list(dict.fromkeys(candidate_urls))
             decision = decision_for(text, result.domain)
             return {
                 "rank": result.rank,
@@ -239,7 +297,7 @@ def analyze_result(driver, config: CrawlerConfig, result: SearchResult) -> dict:
                         "license_signals": decision.get("license_signals", []),
                         "confidence": decision.get("confidence", "low"),
                     }
-                    for url in candidates
+                    for url in candidate_urls
                 ],
                 "decision": {
                     "status": decision["status"],
