@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import List
 
 from .config import CrawlerConfig
+from .crawler import analyze_result, collect_search_results, create_driver
 
 
 def build_queries(config: CrawlerConfig) -> List[str]:
@@ -59,4 +60,27 @@ def write_run_json(out_dir: Path, payload: dict) -> Path:
 def run(config: CrawlerConfig) -> Path:
     queries = build_queries(config)
     payload = _initial_payload(config, queries)
+    driver = create_driver(config)
+    try:
+        all_results = []
+        for query in queries:
+            results = collect_search_results(driver, config, query)
+            all_results.extend(results)
+            if len(all_results) >= config.max_results:
+                break
+
+        all_results = all_results[: config.max_results]
+        for result in all_results:
+            payload_result = analyze_result(driver, config, result)
+            if payload_result:
+                payload["results"].append(payload_result)
+
+        payload["stats"]["total_results"] = len(payload["results"])
+        payload["stats"]["total_candidates"] = sum(
+            len(item.get("candidates", [])) for item in payload["results"]
+        )
+        payload["stats"]["skipped"] = payload["stats"]["total_candidates"]
+    finally:
+        driver.quit()
+
     return write_run_json(config.out_dir, payload)
