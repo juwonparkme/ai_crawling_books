@@ -5,6 +5,7 @@ import sys
 from typing import Sequence
 
 from .config import CrawlerConfig
+from .runner import run
 from .validators import validate_config
 
 
@@ -53,8 +54,9 @@ def parse_args(argv: Sequence[str]) -> CrawlerConfig:
 
 def main(argv: Sequence[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
-    _ = parse_args(argv)
-    print("Configured. Implement crawler runner next.")
+    config = parse_args(argv)
+    out_path = run(config)
+    print(f"Wrote run file: {out_path}")
     return 0
 
 
