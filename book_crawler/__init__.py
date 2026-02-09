@@ -1,0 +1,1 @@
+"""Book crawler CLI package."""
