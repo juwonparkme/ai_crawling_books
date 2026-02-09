@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import List
 
 import importlib
+import re
 
 from .config import CrawlerConfig
 from .license_detector import decision_for, merge_text_parts
@@ -134,6 +135,56 @@ def _collect_page_text(driver) -> str:
     return merge_text_parts(parts)
 
 
+def _extract_metadata(text: str, fallback_title: str) -> dict:
+    normalized = re.sub(r"\s+", " ", text)
+    lower = normalized.lower()
+
+    title = fallback_title or None
+    author = None
+    publisher = None
+    year = None
+    isbn = None
+
+    author_match = re.search(r"\bby\s+([A-Z][A-Za-z.'\-\s]{2,60})", normalized)
+    if author_match:
+        author = author_match.group(1).strip()
+
+    publisher_match = re.search(
+        r"\b(?:published by|publisher|출판사)\s*[:\-]?\s*([A-Za-z0-9.&'\-\s]{2,80})",
+        normalized,
+        re.IGNORECASE,
+    )
+    if publisher_match:
+        publisher = publisher_match.group(1).strip()
+
+    year_match = re.search(r"\b(19\d{2}|20\d{2})\b", normalized)
+    if year_match:
+        year = int(year_match.group(1))
+
+    isbn_match = re.search(
+        r"\b(?:ISBN(?:-1[03])?:?\s*)?((97[89][\-\s]?\d{1,5}[\-\s]?\d{1,7}"
+        r"[\-\s]?\d{1,7}[\-\s]?\d)|([0-9][\-\s]?\d{1,5}[\-\s]?\d{1,7}"
+        r"[\-\s]?\d{1,7}[\-\s]?[0-9X]))\b",
+        normalized,
+        re.IGNORECASE,
+    )
+    if isbn_match:
+        isbn = isbn_match.group(1).replace(" ", "").replace("-", "")
+
+    if "isbn" in lower and isbn is None:
+        isbn_token = re.search(r"isbn\s*[:\-]?\s*([0-9X\-\s]{10,20})", lower)
+        if isbn_token:
+            isbn = isbn_token.group(1).replace(" ", "").replace("-", "")
+
+    return {
+        "title": title,
+        "author": author,
+        "publisher": publisher,
+        "year": year,
+        "isbn": isbn,
+    }
+
+
 def _find_pdf_candidates(driver) -> List[str]:
     by_module = importlib.import_module("selenium.webdriver.common.by")
     By = by_module.By
@@ -169,6 +220,7 @@ def analyze_result(driver, config: CrawlerConfig, result: SearchResult) -> dict:
             )
             _random_delay(config)
             text = _collect_page_text(driver)
+            metadata = _extract_metadata(text, result.title)
             candidates = _find_pdf_candidates(driver)
             decision = decision_for(text, result.domain)
             return {
@@ -179,13 +231,7 @@ def analyze_result(driver, config: CrawlerConfig, result: SearchResult) -> dict:
                     "domain": result.domain,
                     "snippet": result.snippet,
                 },
-                "book": {
-                    "title": None,
-                    "author": None,
-                    "publisher": None,
-                    "year": None,
-                    "isbn": None,
-                },
+                "book": metadata,
                 "candidates": [
                     {
                         "url": url,
