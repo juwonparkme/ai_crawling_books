@@ -13,7 +13,9 @@ from .downloader import build_pdf_filename, download_pdf
 
 
 def build_queries(config: CrawlerConfig) -> List[str]:
-    base = f"{config.title} {config.author}".strip() if config.author else config.title
+    title = _quote_phrase(config.title)
+    author = _quote_phrase(config.author) if config.author else None
+    base = f"{title} {author}".strip() if author else title
     queries = [f"{base} filetype:pdf", f"{base} site:.edu"]
 
     if config.year_from is not None or config.year_to is not None:
@@ -24,19 +26,25 @@ def build_queries(config: CrawlerConfig) -> List[str]:
     return queries
 
 
+def _quote_phrase(value: str) -> str:
+    compact = " ".join((value or "").split())
+    if not compact:
+        return ""
+    return f"\"{compact}\""
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def _initial_payload(config: CrawlerConfig, queries: List[str]) -> dict:
     run_id = str(uuid.uuid4())
+    input_payload = asdict(config)
+    input_payload["out_dir"] = str(config.out_dir)
     return {
         "run_id": run_id,
         "timestamp": _now_iso(),
-        "input": {
-            **asdict(config),
-            "out": str(config.out_dir),
-        },
+        "input": input_payload,
         "query": queries,
         "results": [],
         "stats": {

@@ -1,14 +1,14 @@
 # Selenium crawling flow
 
 ## Goals
-- Query Google Search with book title and optional author.
+- Query Bing Search with book title and optional author.
 - Collect top N result entries.
 - For each result, extract metadata and find PDF candidates.
 - Do not download if license signals are missing or unclear.
 
 ## High-level flow
 1. Build query strings (base + trusted-domain variants).
-2. Open Google Search with Selenium (headless).
+2. Open Bing Search with Selenium (headless).
 3. Parse search results (rank, title, url, snippet).
 4. Visit each result url and extract book metadata.
 5. Discover PDF candidates on the page and linked pages.
@@ -20,13 +20,13 @@
 - Respect delays between requests (random between delay_min and delay_max).
 - Apply retries on transient failures (timeouts, stale elements).
 
-## Google results parsing
-- Target search result blocks: CSS `div.g` (fallback `div.MjjYud`).
+## Search results parsing
+- Target search result blocks: CSS `li.b_algo`.
 - Extract:
-  - title: `h3` text
-  - url: first `a` under result block
-  - snippet: `div.VwiC3b` or `span.VwiC3b`
-- Ignore ads/sponsored blocks by checking url host or missing h3.
+  - title: `h2 a` text
+  - url: `h2 a` href (decode Bing redirect if needed)
+  - snippet: `.b_caption p`
+- Ignore blocks without title/url.
 
 ## Metadata extraction per result
 - Fetch the result page and parse:
@@ -58,6 +58,6 @@
 - Continue on failure; do not abort entire run.
 
 ## Future improvements
-- Add pagination support for Google results.
+- Add pagination support for search results.
 - Add heuristic to de-duplicate same PDF across results.
 - Add optional sitemap or robots.txt compliance checks.

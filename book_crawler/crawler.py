@@ -2,6 +2,7 @@ from __future__ import annotations
 
 # pyright: ignore[reportMissingImports]
 
+import base64
 import time
 import urllib.parse
 from dataclasses import dataclass
@@ -14,6 +15,10 @@ from .config import CrawlerConfig
 from .license_detector import decision_for, merge_text_parts
 
 
+class SearchEngineBlockedError(RuntimeError):
+    """Raised when the search engine blocks automated access with an interstitial page."""
+
+
 @dataclass
 class SearchResult:
     rank: int
@@ -23,9 +28,9 @@ class SearchResult:
     snippet: str
 
 
-def build_google_url(query: str, lang: str) -> str:
-    params = {"q": query, "hl": lang, "num": 10}
-    return "https://www.google.com/search?" + urllib.parse.urlencode(params)
+def build_search_url(query: str, lang: str) -> str:
+    params = {"q": query, "count": 10, "setlang": _bing_lang(lang)}
+    return "https://www.bing.com/search?" + urllib.parse.urlencode(params)
 
 
 def create_driver(config: CrawlerConfig):
@@ -56,39 +61,108 @@ def _random_delay(config: CrawlerConfig) -> None:
     time.sleep(delay)
 
 
+def _page_text(driver) -> str:
+    try:
+        return (driver.page_source or "").lower()
+    except Exception:
+        return ""
+
+
+def _bing_lang(lang: str) -> str:
+    normalized = (lang or "").strip().lower().replace("_", "-")
+    if normalized == "ko":
+        return "ko-kr"
+    if normalized == "en":
+        return "en-us"
+    return normalized or "ko-kr"
+
+
+def _search_block_reason(driver) -> str | None:
+    current_url = (getattr(driver, "current_url", "") or "").lower()
+    if "google.com/sorry/" in current_url:
+        return "google_sorry"
+
+    text = _page_text(driver)
+    markers = (
+        "g-recaptcha",
+        "captcha-form",
+        "unusual traffic",
+        "our systems have detected unusual traffic",
+        "verify you are human",
+        "please solve this challenge",
+        "비정상적인 트래픽",
+        "로봇이 아닙니다",
+        "보안문자",
+    )
+    if any(marker in text for marker in markers):
+        return "search_challenge"
+    return None
+
+
+def _has_search_results(driver) -> bool:
+    by_module = importlib.import_module("selenium.webdriver.common.by")
+    By = by_module.By
+    selectors = (
+        "li.b_algo",
+        "#b_results .b_algo",
+    )
+    for selector in selectors:
+        try:
+            if driver.find_elements(By.CSS_SELECTOR, selector):
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def collect_search_results(driver, config: CrawlerConfig, query: str) -> List[SearchResult]:
     by_module = importlib.import_module("selenium.webdriver.common.by")
-    support_module = importlib.import_module("selenium.webdriver.support")
+    ec_module = importlib.import_module("selenium.webdriver.support.expected_conditions")
     ui_module = importlib.import_module("selenium.webdriver.support.ui")
+    exc_module = importlib.import_module("selenium.common.exceptions")
     By = by_module.By
-    EC = support_module.expected_conditions
+    EC = ec_module
     WebDriverWait = ui_module.WebDriverWait
+    TimeoutException = exc_module.TimeoutException
 
-    url = build_google_url(query, config.lang)
+    url = build_search_url(query, config.lang)
     driver.get(url)
     WebDriverWait(driver, config.timeout).until(
-        EC.presence_of_all_elements_located((By.CSS_SELECTOR, "div.g, div.MjjYud"))
+        EC.presence_of_element_located((By.TAG_NAME, "body"))
     )
 
-    blocks = driver.find_elements(By.CSS_SELECTOR, "div.g, div.MjjYud")
+    block_reason = _search_block_reason(driver)
+    if block_reason:
+        raise SearchEngineBlockedError(f"{block_reason}: {driver.current_url}")
+
+    try:
+        WebDriverWait(driver, config.timeout).until(
+            lambda current_driver: _search_block_reason(current_driver) or _has_search_results(current_driver)
+        )
+    except TimeoutException as exc:
+        block_reason = _search_block_reason(driver)
+        if block_reason:
+            raise SearchEngineBlockedError(f"{block_reason}: {driver.current_url}") from exc
+        raise
+
+    blocks = driver.find_elements(By.CSS_SELECTOR, "li.b_algo")
     results: List[SearchResult] = []
 
     for block in blocks:
         try:
-            title_el = block.find_element(By.CSS_SELECTOR, "h3")
-            link_el = block.find_element(By.CSS_SELECTOR, "a")
+            link_el = block.find_element(By.CSS_SELECTOR, "h2 a")
         except Exception:
             continue
 
-        title = title_el.text.strip()
-        url = link_el.get_attribute("href") or ""
+        title = _element_text(link_el)
+        url = _extract_result_url(link_el.get_attribute("href") or "")
         if not title or not url:
             continue
 
         snippet = ""
-        snippet_els = block.find_elements(By.CSS_SELECTOR, ".VwiC3b")
+        snippet_els = block.find_elements(By.CSS_SELECTOR, ".b_caption p")
         if snippet_els:
-            snippet = snippet_els[0].text.strip()
+            snippet = _element_text(snippet_els[0])
 
         domain = urllib.parse.urlparse(url).netloc
         results.append(
@@ -105,6 +179,47 @@ def collect_search_results(driver, config: CrawlerConfig, query: str) -> List[Se
             break
 
     return results
+
+
+def _element_text(element) -> str:
+    for value in (
+        element.text,
+        element.get_attribute("textContent"),
+        element.get_attribute("innerText"),
+    ):
+        if value:
+            return value.strip()
+    return ""
+
+
+def _extract_result_url(url: str) -> str:
+    if not url:
+        return ""
+
+    parsed = urllib.parse.urlparse(url)
+    if parsed.netloc.lower().endswith("bing.com") and parsed.path.startswith("/ck/a"):
+        params = urllib.parse.parse_qs(parsed.query)
+        encoded = params.get("u", [None])[0]
+        decoded = _decode_bing_redirect(encoded)
+        if decoded:
+            return decoded
+
+    return url
+
+
+def _decode_bing_redirect(value: str | None) -> str | None:
+    if not value or len(value) < 3:
+        return None
+
+    if value.startswith("a1"):
+        payload = value[2:]
+        padding = "=" * (-len(payload) % 4)
+        try:
+            return base64.b64decode(payload + padding).decode("utf-8")
+        except Exception:
+            return None
+
+    return None
 
 
 def _collect_page_text(driver) -> str:
@@ -218,10 +333,10 @@ def _find_pdf_candidates(driver) -> List[dict]:
 
 def _follow_pdf_hints(driver, config: CrawlerConfig, candidates: List[dict]) -> List[str]:
     by_module = importlib.import_module("selenium.webdriver.common.by")
-    support_module = importlib.import_module("selenium.webdriver.support")
+    ec_module = importlib.import_module("selenium.webdriver.support.expected_conditions")
     ui_module = importlib.import_module("selenium.webdriver.support.ui")
     By = by_module.By
-    EC = support_module.expected_conditions
+    EC = ec_module
     WebDriverWait = ui_module.WebDriverWait
 
     found: List[str] = []
@@ -258,12 +373,12 @@ def _follow_pdf_hints(driver, config: CrawlerConfig, candidates: List[dict]) -> 
 def analyze_result(driver, config: CrawlerConfig, result: SearchResult) -> dict:
     exc_module = importlib.import_module("selenium.common.exceptions")
     by_module = importlib.import_module("selenium.webdriver.common.by")
-    support_module = importlib.import_module("selenium.webdriver.support")
+    ec_module = importlib.import_module("selenium.webdriver.support.expected_conditions")
     ui_module = importlib.import_module("selenium.webdriver.support.ui")
     TimeoutException = exc_module.TimeoutException
     StaleElementReferenceException = exc_module.StaleElementReferenceException
     By = by_module.By
-    EC = support_module.expected_conditions
+    EC = ec_module
     WebDriverWait = ui_module.WebDriverWait
 
     for attempt in range(config.retries + 1):

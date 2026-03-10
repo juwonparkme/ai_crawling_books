@@ -5,6 +5,7 @@ import sys
 from typing import Sequence
 
 from .config import CrawlerConfig
+from .crawler import SearchEngineBlockedError
 from .runner import run
 from .validators import validate_config
 
@@ -12,7 +13,7 @@ from .validators import validate_config
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="book_crawler",
-        description="Google book crawler (metadata + legal PDFs only)",
+        description="Bing book crawler (metadata + legal PDFs only)",
     )
     parser.add_argument("--title", required=True, help="Book title")
     parser.add_argument("--author", help="Author name")
@@ -55,7 +56,11 @@ def parse_args(argv: Sequence[str]) -> CrawlerConfig:
 def main(argv: Sequence[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     config = parse_args(argv)
-    out_path = run(config)
+    try:
+        out_path = run(config)
+    except SearchEngineBlockedError as exc:
+        print(f"error: blocked by search engine challenge page: {exc}", file=sys.stderr)
+        return 2
     print(f"Wrote run file: {out_path}")
     return 0
 
