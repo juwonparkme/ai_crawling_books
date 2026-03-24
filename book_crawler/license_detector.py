@@ -44,6 +44,10 @@ LOW_TRUST_HOSTS = (
     "libgen",
 )
 
+DIRECT_PDF_TRUSTED_HOSTS = (
+    "greenteapress.com",
+)
+
 
 def _normalize(text: str) -> str:
     text = text.lower()
@@ -68,6 +72,8 @@ def find_signals(text: str) -> Tuple[List[str], List[str]]:
 
 def is_trusted_domain(domain: str) -> bool:
     domain = domain.lower()
+    if any(host in domain for host in DIRECT_PDF_TRUSTED_HOSTS):
+        return True
     if domain.endswith(".edu") or domain.endswith(".ac"):
         return True
     if domain.endswith(".gov") or domain.endswith(".org"):
@@ -124,6 +130,25 @@ def decision_for(text: str, domain: str) -> dict:
         "confidence": "low",
         "license_signals": [],
     }
+
+
+def decision_for_direct_pdf(text: str, domain: str, relevance_score: int) -> dict:
+    base = decision_for(text, domain)
+    if base["status"] == "allowed":
+        return base
+
+    domain_lower = domain.lower()
+    trusted_direct_pdf = any(host in domain_lower for host in DIRECT_PDF_TRUSTED_HOSTS)
+    if trusted_direct_pdf and relevance_score >= 80:
+        return {
+            "status": "allowed",
+            "reason": "official_distribution",
+            "selected_url": None,
+            "confidence": "high",
+            "license_signals": ["official_distribution"],
+        }
+
+    return base
 
 
 def merge_text_parts(parts: Iterable[str]) -> str:

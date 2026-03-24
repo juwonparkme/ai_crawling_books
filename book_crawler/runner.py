@@ -16,7 +16,7 @@ def build_queries(config: CrawlerConfig) -> List[str]:
     title = _quote_phrase(config.title)
     author = _quote_phrase(config.author) if config.author else None
     base = f"{title} {author}".strip() if author else title
-    queries = [f"{base} filetype:pdf", f"{base} site:.edu"]
+    queries = [f"{base} filetype:pdf"]
 
     if config.year_from is not None or config.year_to is not None:
         year_from = config.year_from or ""

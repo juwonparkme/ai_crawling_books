@@ -11,8 +11,9 @@ from typing import List
 import importlib
 import re
 
+from .brave_search import run_brave_search
 from .config import CrawlerConfig
-from .license_detector import decision_for, merge_text_parts
+from .license_detector import decision_for, decision_for_direct_pdf, merge_text_parts
 from .search_ranker import is_supported_search_language, score_search_result
 
 
@@ -143,57 +144,23 @@ def _has_no_results(driver) -> bool:
 
 
 def collect_search_results(driver, config: CrawlerConfig, query: str) -> List[SearchResult]:
-    by_module = importlib.import_module("selenium.webdriver.common.by")
-    ec_module = importlib.import_module("selenium.webdriver.support.expected_conditions")
-    ui_module = importlib.import_module("selenium.webdriver.support.ui")
-    exc_module = importlib.import_module("selenium.common.exceptions")
-    By = by_module.By
-    EC = ec_module
-    WebDriverWait = ui_module.WebDriverWait
-    TimeoutException = exc_module.TimeoutException
-
-    url = build_search_url(query, config.lang)
-    driver.get(url)
-    WebDriverWait(driver, config.timeout).until(
-        EC.presence_of_element_located((By.TAG_NAME, "body"))
-    )
-
-    block_reason = _search_block_reason(driver)
-    if block_reason:
-        raise SearchEngineBlockedError(f"{block_reason}: {driver.current_url}")
-
     try:
-        WebDriverWait(driver, config.timeout).until(
-            lambda current_driver: (
-                _search_block_reason(current_driver)
-                or _has_search_results(current_driver)
-                or _has_no_results(current_driver)
-            )
-        )
-    except TimeoutException as exc:
-        block_reason = _search_block_reason(driver)
-        if block_reason:
-            raise SearchEngineBlockedError(f"{block_reason}: {driver.current_url}") from exc
+        brave_results = run_brave_search(query, max(config.max_results, 10), config.timeout)
+    except Exception as exc:
+        if isinstance(exc, SearchEngineBlockedError):
+            raise
         return []
 
-    if _has_no_results(driver):
-        return []
-
-    blocks = driver.find_elements(By.CSS_SELECTOR, "li.b_algo")
     results: List[SearchResult] = []
 
-    for block in blocks:
+    for item in brave_results:
         try:
-            link_el = block.find_element(By.CSS_SELECTOR, "h2 a")
-            title = _element_text(link_el)
-            url = _extract_result_url(link_el.get_attribute("href") or "")
+            title = item.title.strip()
+            url = _extract_result_url(item.link.strip())
             if not title or not url:
                 continue
 
-            snippet = ""
-            snippet_els = block.find_elements(By.CSS_SELECTOR, ".b_caption p")
-            if snippet_els:
-                snippet = _element_text(snippet_els[0])
+            snippet = item.snippet.strip()
 
             allowed_language, language_reason = is_supported_search_language(title, snippet)
             if not allowed_language:
@@ -428,6 +395,43 @@ def analyze_result(driver, config: CrawlerConfig, result: SearchResult) -> dict:
     EC = ec_module
     WebDriverWait = ui_module.WebDriverWait
 
+    if _is_direct_pdf_url(result.url):
+        decision = decision_for_direct_pdf(
+            merge_text_parts([result.title, result.snippet, result.url]),
+            result.domain,
+            result.relevance_score,
+        )
+        metadata = _extract_metadata(
+            merge_text_parts([result.title, result.snippet]),
+            result.title,
+        )
+        return {
+            "rank": result.rank,
+            "source": {
+                "title": result.title,
+                "url": result.url,
+                "domain": result.domain,
+                "snippet": result.snippet,
+                "relevance_score": result.relevance_score,
+                "relevance_reasons": result.relevance_reasons,
+            },
+            "book": metadata,
+            "candidates": [
+                {
+                    "url": result.url,
+                    "content_type": "application/pdf",
+                    "license_signals": decision.get("license_signals", []),
+                    "confidence": decision.get("confidence", "low"),
+                }
+            ],
+            "decision": {
+                "status": decision["status"],
+                "reason": decision["reason"],
+                "selected_url": None,
+            },
+            "downloads": [],
+        }
+
     for attempt in range(config.retries + 1):
         try:
             driver.get(result.url)
@@ -500,3 +504,8 @@ def analyze_result(driver, config: CrawlerConfig, result: SearchResult) -> dict:
             continue
 
     return {}
+
+
+def _is_direct_pdf_url(url: str) -> bool:
+    lowered = (url or "").lower()
+    return lowered.endswith(".pdf") or ".pdf?" in lowered
