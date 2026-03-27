@@ -1,4 +1,5 @@
-# ai_crawling_books_by_codex
+# ai_crawling_books
+
 
 Design notes and flow:
 - `book_crawler/flow.md`
