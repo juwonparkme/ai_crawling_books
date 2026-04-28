@@ -2,285 +2,301 @@ from __future__ import annotations
 
 import json
 import queue
+import sys
 import threading
-import urllib.parse
-import webbrowser
 from datetime import datetime
-from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from .service import RunSettings, load_run_file, run_crawler, validate_settings
 
-HOST = "127.0.0.1"
-PORT = 8765
 
-
-class AppState:
-    def __init__(self) -> None:
-        self.lock = threading.Lock()
-        self.cancel_event = threading.Event()
-        self.events: queue.Queue[dict] = queue.Queue()
-        self.worker: threading.Thread | None = None
-        self.running = False
-        self.last_result: str | None = None
-        self.log_path: Path | None = None
-
-    def emit(self, event: str, message: str) -> None:
-        payload = {"event": event, "message": message}
-        self.events.put(payload)
-        if self.log_path:
-            self.log_path.parent.mkdir(parents=True, exist_ok=True)
-            with self.log_path.open("a", encoding="utf-8") as handle:
-                handle.write(f"{datetime.now().isoformat(timespec='seconds')} {event}: {message}\n")
-
-
-STATE = AppState()
-
-
-class GuiHandler(BaseHTTPRequestHandler):
-    server_version = "BookCrawlerGUI/1.0"
-
-    def do_GET(self) -> None:
-        parsed = urllib.parse.urlparse(self.path)
-        if parsed.path == "/":
-            self._send_html(INDEX_HTML)
-            return
-        if parsed.path == "/api/events":
-            self._send_json(_drain_events())
-            return
-        if parsed.path == "/api/status":
-            with STATE.lock:
-                payload = {"running": STATE.running, "last_result": STATE.last_result}
-            self._send_json(payload)
-            return
-        if parsed.path == "/api/results":
-            query = urllib.parse.parse_qs(parsed.query)
-            out_dir = query.get("out_dir", ["result"])[0]
-            self._send_json(_list_results(out_dir))
-            return
-        if parsed.path == "/api/result":
-            query = urllib.parse.parse_qs(parsed.query)
-            path = query.get("path", [""])[0]
-            self._send_json(_load_result_payload(path))
-            return
-        self.send_error(HTTPStatus.NOT_FOUND)
-
-    def do_POST(self) -> None:
-        parsed = urllib.parse.urlparse(self.path)
-        if parsed.path == "/api/validate":
-            self._send_json({"errors": validate_settings(_settings_from_payload(self._read_json()))})
-            return
-        if parsed.path == "/api/run":
-            self._send_json(_start_run(_settings_from_payload(self._read_json())))
-            return
-        if parsed.path == "/api/cancel":
-            STATE.cancel_event.set()
-            STATE.emit("cancel", "cancel requested")
-            self._send_json({"ok": True})
-            return
-        self.send_error(HTTPStatus.NOT_FOUND)
-
-    def log_message(self, _format: str, *_args) -> None:
-        return
-
-    def _read_json(self) -> dict:
-        length = int(self.headers.get("Content-Length", "0"))
-        if length <= 0:
-            return {}
-        return json.loads(self.rfile.read(length).decode("utf-8"))
-
-    def _send_json(self, payload: object) -> None:
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def _send_html(self, html: str) -> None:
-        body = html.encode("utf-8")
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-
-def _settings_from_payload(payload: dict) -> RunSettings:
-    def optional_int(name: str):
-        value = str(payload.get(name, "")).strip()
-        return int(value) if value else None
-
-    return RunSettings(
-        title=str(payload.get("title", "")),
-        author=str(payload.get("author", "")),
-        out_dir=str(payload.get("out_dir", "result")),
-        max_results=int(payload.get("max_results", 20)),
-        lang=str(payload.get("lang", "ko")),
-        year_from=optional_int("year_from"),
-        year_to=optional_int("year_to"),
-        headless=bool(payload.get("headless", True)),
-        dry_run=bool(payload.get("dry_run", True)),
-        timeout=float(payload.get("timeout", 20)),
-        retries=int(payload.get("retries", 2)),
-        search_provider=str(payload.get("search_provider", "brave")),
-    )
-
-
-def _start_run(settings: RunSettings) -> dict:
-    errors = validate_settings(settings)
-    if errors:
-        return {"ok": False, "errors": errors}
-
-    with STATE.lock:
-        if STATE.running:
-            return {"ok": False, "errors": ["already running"]}
-        STATE.running = True
-        STATE.last_result = None
-        STATE.cancel_event = threading.Event()
-        STATE.log_path = Path(settings.out_dir).expanduser() / f"gui_{datetime.now():%Y%m%d_%H%M%S}.log"
-
-    while not STATE.events.empty():
-        STATE.events.get_nowait()
-
-    worker = threading.Thread(target=_run_worker, args=(settings,), daemon=True)
-    with STATE.lock:
-        STATE.worker = worker
-    worker.start()
-    return {"ok": True, "errors": []}
-
-
-def _run_worker(settings: RunSettings) -> None:
-    def progress(event: str, message: str) -> None:
-        STATE.emit(event, message)
-
-    result = run_crawler(settings, progress_callback=progress, cancel_event=STATE.cancel_event)
-    with STATE.lock:
-        STATE.running = False
-        STATE.last_result = str(result.run_path) if result.run_path else None
-    STATE.emit(result.status, str(result.run_path or result.error or ""))
-
-
-def _drain_events() -> list[dict]:
-    events = []
-    while True:
-        try:
-            events.append(STATE.events.get_nowait())
-        except queue.Empty:
-            return events
-
-
-def _list_results(out_dir: str) -> dict:
-    root = Path(out_dir).expanduser().resolve(strict=False)
-    files = []
-    if root.exists():
-        files = [
-            {"name": path.name, "path": str(path)}
-            for path in sorted(root.glob("run_*.json"), reverse=True)
-        ]
-    return {"results": files}
-
-
-def _load_result_payload(path: str) -> dict:
-    if not path:
-        return {"error": "path required"}
+def main() -> int:
     try:
-        return {"payload": load_run_file(path)}
-    except Exception as exc:
-        return {"error": str(exc)}
+        from PyQt6.QtCore import Qt, QTimer
+        from PyQt6.QtWidgets import (
+            QApplication,
+            QCheckBox,
+            QComboBox,
+            QFileDialog,
+            QFormLayout,
+            QGridLayout,
+            QHBoxLayout,
+            QLabel,
+            QLineEdit,
+            QMainWindow,
+            QMessageBox,
+            QPushButton,
+            QSpinBox,
+            QSplitter,
+            QTableWidget,
+            QTableWidgetItem,
+            QTextEdit,
+            QVBoxLayout,
+            QWidget,
+        )
+    except ModuleNotFoundError as exc:
+        print("PyQt6 is required. Install with: python3 -m pip install -r requirements.txt", file=sys.stderr)
+        raise SystemExit(2) from exc
+
+    class MainWindow(QMainWindow):
+        def __init__(self) -> None:
+            super().__init__()
+            self.setWindowTitle("ai_crawling_books")
+            self.resize(1180, 760)
+            self.events: queue.Queue[tuple[str, str]] = queue.Queue()
+            self.cancel_event = threading.Event()
+            self.worker: threading.Thread | None = None
+            self.current_payload: dict | None = None
+            self.log_path: Path | None = None
+
+            root = QWidget()
+            self.setCentralWidget(root)
+            outer = QHBoxLayout(root)
+            outer.setContentsMargins(14, 14, 14, 14)
+
+            form_panel = QWidget()
+            form_panel.setMaximumWidth(360)
+            form = QFormLayout(form_panel)
+            form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
+            self.title_input = QLineEdit()
+            self.title_input.setPlaceholderText("Database System Concepts")
+            self.author_input = QLineEdit()
+            self.author_input.setPlaceholderText("Silberschatz")
+            self.out_input = QLineEdit(str(Path.cwd() / "result"))
+            self.browse_button = QPushButton("Browse")
+            out_row = QHBoxLayout()
+            out_row.addWidget(self.out_input)
+            out_row.addWidget(self.browse_button)
+            out_widget = QWidget()
+            out_widget.setLayout(out_row)
+
+            self.provider_input = QComboBox()
+            self.provider_input.addItems(["brave", "bing"])
+            self.english_input = QCheckBox("English")
+            self.korean_input = QCheckBox("Korean")
+            self.english_input.setChecked(True)
+            self.korean_input.setChecked(True)
+            self.max_results_input = QSpinBox()
+            self.max_results_input.setRange(1, 100)
+            self.max_results_input.setValue(20)
+            self.retries_input = QSpinBox()
+            self.retries_input.setRange(0, 10)
+            self.retries_input.setValue(2)
+            self.timeout_input = QSpinBox()
+            self.timeout_input.setRange(1, 300)
+            self.timeout_input.setValue(20)
+            self.dry_run_input = QCheckBox("Dry run")
+            self.dry_run_input.setChecked(True)
+
+            checks = QWidget()
+            checks_layout = QHBoxLayout(checks)
+            checks_layout.setContentsMargins(0, 0, 0, 0)
+            checks_layout.addWidget(self.dry_run_input)
+
+            languages = QWidget()
+            languages_layout = QHBoxLayout(languages)
+            languages_layout.setContentsMargins(0, 0, 0, 0)
+            languages_layout.addWidget(self.english_input)
+            languages_layout.addWidget(self.korean_input)
+
+            form.addRow("Title", self.title_input)
+            form.addRow("Author", self.author_input)
+            form.addRow("Output", out_widget)
+            form.addRow("Provider", self.provider_input)
+            form.addRow("Language", languages)
+            form.addRow("Max results", self.max_results_input)
+            form.addRow("Retries", self.retries_input)
+            form.addRow("Timeout", self.timeout_input)
+            form.addRow("", checks)
+
+            self.run_button = QPushButton("Run")
+            self.cancel_button = QPushButton("Cancel")
+            self.cancel_button.setEnabled(False)
+            self.load_button = QPushButton("Load result")
+            action_row = QGridLayout()
+            action_row.addWidget(self.run_button, 0, 0)
+            action_row.addWidget(self.cancel_button, 0, 1)
+            action_row.addWidget(self.load_button, 1, 0, 1, 2)
+            action_widget = QWidget()
+            action_widget.setLayout(action_row)
+            form.addRow("", action_widget)
+
+            notice = QLabel(
+                "Downloads stay blocked unless license and domain signals are strong. "
+                "Manual source review still required."
+            )
+            notice.setWordWrap(True)
+            form.addRow("", notice)
+
+            content = QSplitter()
+            content.setOrientation(Qt.Orientation.Vertical)
+            self.status_label = QLabel("Idle")
+            self.table = QTableWidget(0, 4)
+            self.table.setHorizontalHeaderLabels(["Decision", "Score", "PDFs", "Source"])
+            self.table.horizontalHeader().setStretchLastSection(True)
+            self.detail = QTextEdit()
+            self.detail.setReadOnly(True)
+            self.log = QTextEdit()
+            self.log.setReadOnly(True)
+
+            top = QWidget()
+            top_layout = QVBoxLayout(top)
+            top_layout.addWidget(self.status_label)
+            top_layout.addWidget(self.table)
+            top_layout.addWidget(QLabel("Details"))
+            top_layout.addWidget(self.detail)
+            content.addWidget(top)
+            content.addWidget(self.log)
+            outer.addWidget(form_panel)
+            outer.addWidget(content, 1)
+
+            self.browse_button.clicked.connect(self.choose_output)
+            self.run_button.clicked.connect(self.start_run)
+            self.cancel_button.clicked.connect(self.cancel_run)
+            self.load_button.clicked.connect(self.choose_result)
+            self.table.itemSelectionChanged.connect(self.show_selected)
+
+            self.timer = QTimer(self)
+            self.timer.timeout.connect(self.drain_events)
+            self.timer.start(150)
+
+        def settings(self) -> RunSettings:
+            return RunSettings(
+                title=self.title_input.text(),
+                author=self.author_input.text(),
+                out_dir=self.out_input.text() or "result",
+                max_results=self.max_results_input.value(),
+                lang=_language_code(
+                    english=self.english_input.isChecked(),
+                    korean=self.korean_input.isChecked(),
+                ),
+                year_from=None,
+                year_to=None,
+                headless=True,
+                dry_run=self.dry_run_input.isChecked(),
+                timeout=float(self.timeout_input.value()),
+                retries=self.retries_input.value(),
+                search_provider=self.provider_input.currentText(),
+            )
+
+        def choose_output(self) -> None:
+            selected = QFileDialog.getExistingDirectory(self, "Output directory", self.out_input.text())
+            if selected:
+                self.out_input.setText(selected)
+
+        def choose_result(self) -> None:
+            selected, _ = QFileDialog.getOpenFileName(
+                self,
+                "Open run JSON",
+                self.out_input.text() or str(Path.cwd()),
+                "Run JSON (run_*.json);;JSON (*.json)",
+            )
+            if selected:
+                self.load_result(Path(selected))
+
+        def start_run(self) -> None:
+            try:
+                settings = self.settings()
+            except ValueError as exc:
+                QMessageBox.critical(self, "Invalid input", str(exc))
+                return
+            errors = validate_settings(settings)
+            if errors:
+                QMessageBox.critical(self, "Invalid input", "\n".join(errors))
+                return
+
+            self.cancel_event = threading.Event()
+            self.log_path = Path(settings.out_dir).expanduser() / f"gui_{datetime.now():%Y%m%d_%H%M%S}.log"
+            self.clear_results()
+            self.set_running(True)
+            self.append_log("started")
+            self.worker = threading.Thread(target=self.run_worker, args=(settings,), daemon=True)
+            self.worker.start()
+
+        def run_worker(self, settings: RunSettings) -> None:
+            def progress(event: str, message: str) -> None:
+                self.events.put((event, message))
+
+            result = run_crawler(settings, progress_callback=progress, cancel_event=self.cancel_event)
+            self.events.put((result.status, str(result.run_path or result.error or "")))
+
+        def cancel_run(self) -> None:
+            self.cancel_event.set()
+            self.append_log("cancel requested")
+
+        def drain_events(self) -> None:
+            while True:
+                try:
+                    event, message = self.events.get_nowait()
+                except queue.Empty:
+                    break
+                self.status_label.setText(f"{event}: {message}")
+                self.append_log(f"{event}: {message}")
+                if event in {"completed", "failed", "cancelled"}:
+                    self.set_running(False)
+                    if event == "completed" and message:
+                        self.load_result(Path(message))
+
+        def set_running(self, running: bool) -> None:
+            self.run_button.setEnabled(not running)
+            self.cancel_button.setEnabled(running)
+
+        def append_log(self, message: str) -> None:
+            line = f"{datetime.now():%H:%M:%S} {message}"
+            self.log.append(line)
+            if self.log_path:
+                self.log_path.parent.mkdir(parents=True, exist_ok=True)
+                with self.log_path.open("a", encoding="utf-8") as handle:
+                    handle.write(line + "\n")
+
+        def load_result(self, path: Path) -> None:
+            try:
+                self.current_payload = load_run_file(path)
+            except Exception as exc:
+                QMessageBox.critical(self, "Load failed", str(exc))
+                return
+            self.clear_results()
+            for row, item in enumerate(self.current_payload.get("results", [])):
+                source = item.get("source", {})
+                decision = item.get("decision", {})
+                values = [
+                    decision.get("status", ""),
+                    str(source.get("relevance_score", "")),
+                    str(len(item.get("candidates", []))),
+                    source.get("url", ""),
+                ]
+                self.table.insertRow(row)
+                for col, value in enumerate(values):
+                    self.table.setItem(row, col, QTableWidgetItem(value))
+            self.status_label.setText(f"Loaded {path}")
+
+        def clear_results(self) -> None:
+            self.table.setRowCount(0)
+            self.detail.clear()
+
+        def show_selected(self) -> None:
+            if not self.current_payload:
+                return
+            selected = self.table.currentRow()
+            if selected < 0:
+                return
+            result = self.current_payload.get("results", [])[selected]
+            self.detail.setPlainText(json.dumps(result, ensure_ascii=False, indent=2))
+
+    app = QApplication(sys.argv)
+    window = MainWindow()
+    window.show()
+    return app.exec()
 
 
-def main() -> None:
-    server = ThreadingHTTPServer((HOST, PORT), GuiHandler)
-    url = f"http://{HOST}:{PORT}"
-    print(f"ai_crawling_books GUI: {url}")
-    webbrowser.open(url)
-    server.serve_forever()
-
-
-INDEX_HTML = r"""<!doctype html>
-<html lang="ko">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ai_crawling_books</title>
-<style>
-:root{--bg:#101418;--panel:#171d23;--text:#e9eef2;--muted:#9aa8b4;--line:#2c3640;--accent:#6ee7b7;--warn:#f7c76b;--bad:#fb7185}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Avenir Next,ui-sans-serif,sans-serif}
-main{display:grid;grid-template-columns:340px 1fr;min-height:100vh}aside{border-right:1px solid var(--line);padding:20px;background:var(--panel)}
-section{padding:20px}label{display:block;color:var(--muted);font-size:12px;margin:12px 0 6px}
-input,select,button{width:100%;border:1px solid var(--line);border-radius:6px;background:#0f1419;color:var(--text);padding:10px;font:inherit}
-button{cursor:pointer;background:#1f2a33}button.primary{background:var(--accent);color:#062017;border:0;font-weight:700}
-button:disabled{opacity:.45;cursor:not-allowed}.row{display:grid;grid-template-columns:1fr 1fr;gap:10px}.checks{display:flex;gap:14px;margin:12px 0}
-.checks label{display:flex;align-items:center;gap:6px;margin:0}.checks input{width:auto}.toolbar{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px}
-.notice{margin-top:14px;color:var(--warn);font-size:13px;line-height:1.45}.top{display:flex;align-items:center;justify-content:space-between;gap:12px}
-.status{color:var(--muted)}.grid{display:grid;grid-template-columns:minmax(0,1fr) 420px;gap:16px;margin-top:16px}
-table{width:100%;border-collapse:collapse;background:var(--panel);border:1px solid var(--line)}
-th,td{padding:9px;border-bottom:1px solid var(--line);font-size:13px;text-align:left;vertical-align:top}tr:hover{background:#202832}
-pre{white-space:pre-wrap;overflow:auto;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:12px;min-height:220px}
-.log{height:220px}.pill{display:inline-block;padding:2px 7px;border-radius:999px;background:#26313a;color:var(--accent);font-size:12px}
-</style>
-</head>
-<body>
-<main>
-<aside>
-<h1>ai_crawling_books</h1>
-<label>Title</label><input id="title" placeholder="Database System Concepts">
-<label>Author</label><input id="author" placeholder="Silberschatz">
-<label>Output directory</label><input id="out_dir" value="result">
-<div class="row">
-<div><label>Provider</label><select id="search_provider"><option>brave</option><option>bing</option></select></div>
-<div><label>Lang</label><input id="lang" value="ko"></div>
-</div>
-<div class="row">
-<div><label>Max results</label><input id="max_results" type="number" min="1" value="20"></div>
-<div><label>Retries</label><input id="retries" type="number" min="0" value="2"></div>
-</div>
-<div class="row">
-<div><label>Year from</label><input id="year_from"></div>
-<div><label>Year to</label><input id="year_to"></div>
-</div>
-<label>Timeout</label><input id="timeout" type="number" min="1" value="20">
-<div class="checks">
-<label><input id="headless" type="checkbox" checked>Headless</label>
-<label><input id="dry_run" type="checkbox" checked>Dry run</label>
-</div>
-<div class="toolbar">
-<button class="primary" id="run">Run</button>
-<button id="cancel" disabled>Cancel</button>
-</div>
-<button id="refresh" style="margin-top:10px">Refresh results</button>
-<div class="notice">Downloads stay blocked unless license and domain signals are strong. Manual source review still required.</div>
-</aside>
-<section>
-<div class="top"><h2>Run review</h2><div class="status" id="status">Idle</div></div>
-<div class="grid">
-<div><table><thead><tr><th>Decision</th><th>Score</th><th>PDFs</th><th>Source</th></tr></thead><tbody id="rows"></tbody></table></div>
-<div><div class="pill">Details</div><pre id="detail"></pre></div>
-</div>
-<h3>Logs</h3><pre class="log" id="log"></pre>
-<h3>Saved runs</h3><pre id="runs"></pre>
-</section>
-</main>
-<script>
-const $=id=>document.getElementById(id); let lastPayload=null;
-function payload(){return {title:$('title').value,author:$('author').value,out_dir:$('out_dir').value,search_provider:$('search_provider').value,lang:$('lang').value,max_results:+$('max_results').value,retries:+$('retries').value,year_from:$('year_from').value,year_to:$('year_to').value,timeout:+$('timeout').value,headless:$('headless').checked,dry_run:$('dry_run').checked}}
-function log(line){$('log').textContent+=new Date().toLocaleTimeString()+' '+line+'\n';$('log').scrollTop=$('log').scrollHeight}
-async function post(url,data={}){return fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)}).then(r=>r.json())}
-$('run').onclick=async()=>{const r=await post('/api/run',payload()); if(!r.ok){alert(r.errors.join('\n'));return} $('run').disabled=true;$('cancel').disabled=false;log('started')}
-$('cancel').onclick=async()=>{await post('/api/cancel');log('cancel requested')}
-$('refresh').onclick=refreshRuns;
-async function poll(){const events=await fetch('/api/events').then(r=>r.json()); for(const e of events){$('status').textContent=e.event+': '+e.message;log(e.event+': '+e.message); if(e.event==='completed') await loadResult(e.message)} const s=await fetch('/api/status').then(r=>r.json()); $('run').disabled=s.running;$('cancel').disabled=!s.running; setTimeout(poll,1000)}
-async function refreshRuns(){const q=new URLSearchParams({out_dir:$('out_dir').value}); const data=await fetch('/api/results?'+q).then(r=>r.json()); $('runs').innerHTML=data.results.map(x=>`<button onclick="loadResult('${x.path.replaceAll('\\\\','\\\\\\\\')}')">${x.name}</button>`).join('\n')}
-async function loadResult(path){const q=new URLSearchParams({path}); const data=await fetch('/api/result?'+q).then(r=>r.json()); if(data.error){log(data.error);return} lastPayload=data.payload; renderRows(lastPayload)}
-function renderRows(payload){const rows=$('rows'); rows.innerHTML=''; for(const [i,item] of (payload.results||[]).entries()){const src=item.source||{}, dec=item.decision||{}; const tr=document.createElement('tr'); tr.innerHTML=`<td>${dec.status||''}</td><td>${src.relevance_score||''}</td><td>${(item.candidates||[]).length}</td><td>${src.url||''}</td>`; tr.onclick=()=>{$('detail').textContent=JSON.stringify(item,null,2)}; rows.appendChild(tr)} $('status').textContent='Loaded '+(payload.run_id||'result')}
-refreshRuns(); poll();
-</script>
-</body>
-</html>
-"""
+def _language_code(english: bool, korean: bool) -> str:
+    if not english and not korean:
+        raise ValueError("Select at least one language")
+    if english and not korean:
+        return "en"
+    return "ko"
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
