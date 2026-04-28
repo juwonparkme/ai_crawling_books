@@ -13,7 +13,7 @@ from .validators import validate_config
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="book_crawler",
-        description="Bing book crawler (metadata + legal PDFs only)",
+        description="Book crawler (metadata + legal PDFs only)",
     )
     parser.add_argument("--title", required=True, help="Book title")
     parser.add_argument("--author", help="Author name")
@@ -38,6 +38,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--delay-max", type=float, default=3.5, help="Max delay")
     parser.add_argument("--timeout", type=float, default=20, help="Page timeout")
     parser.add_argument("--retries", type=int, default=2, help="Retries per page")
+    parser.add_argument(
+        "--search-provider",
+        choices=("brave", "bing"),
+        default="brave",
+        help="Search provider",
+    )
     return parser
 
 

@@ -11,6 +11,8 @@ from typing import List
 import importlib
 import re
 
+from .bing_search import SearchEngineBlockedError as BingSearchBlockedError
+from .bing_search import run_bing_search
 from .brave_search import run_brave_search
 from .config import CrawlerConfig
 from .license_detector import decision_for, decision_for_direct_pdf, merge_text_parts
@@ -30,11 +32,6 @@ class SearchResult:
     snippet: str
     relevance_score: int = 0
     relevance_reasons: List[str] = field(default_factory=list)
-
-
-def build_search_url(query: str, lang: str) -> str:
-    params = {"q": query, "count": 10, "setlang": _bing_lang(lang)}
-    return "https://www.bing.com/search?" + urllib.parse.urlencode(params)
 
 
 def create_driver(config: CrawlerConfig):
@@ -65,85 +62,26 @@ def _random_delay(config: CrawlerConfig) -> None:
     time.sleep(delay)
 
 
-def _page_text(driver) -> str:
-    try:
-        return (driver.page_source or "").lower()
-    except Exception:
-        return ""
-
-
-def _bing_lang(lang: str) -> str:
-    normalized = (lang or "").strip().lower().replace("_", "-")
-    if normalized == "ko":
-        return "ko-kr"
-    if normalized == "en":
-        return "en-us"
-    return normalized or "ko-kr"
-
-
-def _search_block_reason(driver) -> str | None:
-    current_url = (getattr(driver, "current_url", "") or "").lower()
-    if "google.com/sorry/" in current_url:
-        return "google_sorry"
-
-    text = _page_text(driver)
-    markers = (
-        "g-recaptcha",
-        "captcha-form",
-        "unusual traffic",
-        "our systems have detected unusual traffic",
-        "verify you are human",
-        "please solve this challenge",
-        "비정상적인 트래픽",
-        "로봇이 아닙니다",
-        "보안문자",
-    )
-    if any(marker in text for marker in markers):
-        return "search_challenge"
-    return None
-
-
-def _has_search_results(driver) -> bool:
-    by_module = importlib.import_module("selenium.webdriver.common.by")
-    By = by_module.By
-    selectors = (
-        "li.b_algo",
-        "#b_results .b_algo",
-    )
-    for selector in selectors:
-        try:
-            if driver.find_elements(By.CSS_SELECTOR, selector):
-                return True
-        except Exception:
-            continue
-    return False
-
-
-def _has_no_results(driver) -> bool:
-    by_module = importlib.import_module("selenium.webdriver.common.by")
-    By = by_module.By
-    selectors = (
-        ".b_no",
-        "#b_results .b_no",
-    )
-    for selector in selectors:
-        try:
-            if driver.find_elements(By.CSS_SELECTOR, selector):
-                return True
-        except Exception:
-            continue
-
-    text = _page_text(driver)
-    markers = (
-        "there are no results for",
-        "do not contain the terms",
-        "검색 결과가 없습니다",
-        "포함한 결과 없음",
-    )
-    return any(marker in text for marker in markers)
-
-
 def collect_search_results(driver, config: CrawlerConfig, query: str) -> List[SearchResult]:
+    if config.search_provider == "bing":
+        try:
+            bing_results = run_bing_search(driver, config, query, _extract_result_url)
+        except BingSearchBlockedError as exc:
+            raise SearchEngineBlockedError(str(exc)) from exc
+        return _rank_search_results(
+            [
+                SearchResult(
+                    rank=index,
+                    title=item.title,
+                    url=item.link,
+                    domain=item.domain,
+                    snippet=item.snippet,
+                )
+                for index, item in enumerate(bing_results, start=1)
+            ],
+            config,
+        )
+
     try:
         brave_results = run_brave_search(query, max(config.max_results, 10), config.timeout)
     except Exception as exc:
@@ -179,6 +117,10 @@ def collect_search_results(driver, config: CrawlerConfig, query: str) -> List[Se
         except Exception:
             continue
 
+    return _rank_search_results(results, config)
+
+
+def _rank_search_results(results: List[SearchResult], config: CrawlerConfig) -> List[SearchResult]:
     for result in results:
         result.relevance_score, result.relevance_reasons = score_search_result(
             config.title,
@@ -192,18 +134,7 @@ def collect_search_results(driver, config: CrawlerConfig, query: str) -> List[Se
     results.sort(key=lambda item: (-item.relevance_score, item.rank))
     for index, result in enumerate(results, start=1):
         result.rank = index
-    return results
-
-
-def _element_text(element) -> str:
-    for value in (
-        element.text,
-        element.get_attribute("textContent"),
-        element.get_attribute("innerText"),
-    ):
-        if value:
-            return value.strip()
-    return ""
+    return results[: config.max_results]
 
 
 def _extract_result_url(url: str) -> str:

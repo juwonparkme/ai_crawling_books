@@ -9,6 +9,7 @@ from .config import CrawlerConfig
 _LANG_RE = re.compile(r"[A-Za-z]{2,8}([_-][A-Za-z0-9]{2,8})?")
 _YEAR_MIN = 1000
 _YEAR_MAX = 2100
+_SEARCH_PROVIDERS = {"brave", "bing"}
 
 
 def validate_config(config: CrawlerConfig) -> List[str]:
@@ -46,8 +47,15 @@ def validate_config(config: CrawlerConfig) -> List[str]:
     if config.retries < 0:
         errors.append("--retries must be 0 or greater")
 
+    if config.search_provider not in _SEARCH_PROVIDERS:
+        errors.append("--search-provider must be brave or bing")
+
     if not config.out_dir.exists():
-        errors.append("--out directory does not exist")
+        parent = config.out_dir.parent
+        if not parent.exists():
+            errors.append("--out parent directory does not exist")
+        elif not os.access(parent, os.W_OK):
+            errors.append("--out parent directory is not writable")
     elif not config.out_dir.is_dir():
         errors.append("--out must be a directory")
     elif not os.access(config.out_dir, os.W_OK):

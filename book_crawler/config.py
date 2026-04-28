@@ -20,6 +20,7 @@ class CrawlerConfig:
     delay_max: float
     timeout: float
     retries: int
+    search_provider: str = "brave"
 
     @classmethod
     def from_namespace(cls, ns) -> "CrawlerConfig":
@@ -40,4 +41,5 @@ class CrawlerConfig:
             delay_max=ns.delay_max,
             timeout=ns.timeout,
             retries=ns.retries,
+            search_provider=getattr(ns, "search_provider", "brave"),
         )

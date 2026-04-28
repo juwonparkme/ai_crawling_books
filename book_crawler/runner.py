@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import uuid
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -10,6 +11,10 @@ from typing import List
 from .config import CrawlerConfig
 from .crawler import SearchResult, analyze_result, collect_search_results, create_driver
 from .downloader import build_pdf_filename, download_pdf
+
+
+class CrawlerCancelled(RuntimeError):
+    """Raised when a caller cancels an in-flight crawler run."""
 
 
 def build_queries(config: CrawlerConfig) -> List[str]:
@@ -66,18 +71,24 @@ def write_run_json(out_dir: Path, payload: dict) -> Path:
     return path
 
 
-def run(config: CrawlerConfig) -> Path:
+def run(config: CrawlerConfig, progress_callback=None, cancel_event: threading.Event | None = None) -> Path:
     queries = build_queries(config)
     payload = _initial_payload(config, queries)
+    _emit(progress_callback, "started", f"run started with {config.search_provider}")
     driver = create_driver(config)
     try:
         all_results = []
         for query in queries:
+            _check_cancelled(cancel_event)
+            _emit(progress_callback, "search", query)
             results = collect_search_results(driver, config, query)
+            _emit(progress_callback, "search_results", f"{len(results)} results")
             all_results.extend(results)
 
         all_results = _prioritize_search_results(all_results, config.max_results)
         for result in all_results:
+            _check_cancelled(cancel_event)
+            _emit(progress_callback, "analyze", result.url)
             payload_result = analyze_result(driver, config, result)
             if not payload_result:
                 continue
@@ -90,6 +101,8 @@ def run(config: CrawlerConfig) -> Path:
                 decision["selected_url"] = selected_url
 
             if allowed and selected_url and not config.dry_run:
+                _check_cancelled(cancel_event)
+                _emit(progress_callback, "download", selected_url)
                 book = payload_result.get("book", {})
                 filename = build_pdf_filename(
                     book.get("title"),
@@ -141,7 +154,19 @@ def run(config: CrawlerConfig) -> Path:
     finally:
         driver.quit()
 
-    return write_run_json(config.out_dir, payload)
+    path = write_run_json(config.out_dir, payload)
+    _emit(progress_callback, "completed", str(path))
+    return path
+
+
+def _emit(progress_callback, event: str, message: str) -> None:
+    if progress_callback:
+        progress_callback(event, message)
+
+
+def _check_cancelled(cancel_event: threading.Event | None) -> None:
+    if cancel_event and cancel_event.is_set():
+        raise CrawlerCancelled("crawler_cancelled")
 
 
 def _prioritize_candidates(candidates: List[dict]) -> List[dict]:
