@@ -9,7 +9,7 @@
 
 **책 제목과 저자를 기반으로 공개 배포 근거가 있는 PDF 후보만 보수적으로 찾는 로컬 크롤러입니다.**
 
-[실행 가이드](#-시작하기) | [라이선스 판단 노트](book_crawler/licensing.md) | [이슈 리포트](https://github.com/juwonparkme/ai_crawling_books/issues)
+[English](README.en.md) | [실행 가이드](#-시작하기) | [라이선스 판단 노트](book_crawler/licensing.md) | [이슈 리포트](https://github.com/juwonparkme/ai_crawling_books/issues)
 
 </div>
 
@@ -247,6 +247,7 @@ ai_crawling_books/
 ├── requirements.txt          # 런타임 의존성
 ├── requirements-dev.txt      # 빌드 의존성
 ├── LICENSE
+├── README.en.md
 └── README.md
 ```
 
