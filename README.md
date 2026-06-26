@@ -30,10 +30,8 @@
 - [프로젝트 구조](#-프로젝트-구조)
 - [주요 기능 상세](#-주요-기능-상세)
 - [트러블슈팅](#-트러블슈팅)
-- [기여하기](#-기여하기)
 - [라이선스](#-라이선스)
 - [문의](#-문의)
-- [감사의 말](#-감사의-말)
 
 ---
 
@@ -334,18 +332,6 @@ python3 -m pip install -r requirements.txt
 2. 실제 다운로드가 필요하면 `--no-dry-run`으로 실행합니다.
 3. 결과 JSON의 `decision.reason`을 확인합니다.
 
----
-
-## 🤝 기여하기
-
-1. Fork the Project
-2. Create your Feature Branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your Changes (`git commit -m 'feat: add amazing feature'`)
-4. Push to the Branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
-
----
-
 ## 📄 라이선스
 
 이 프로젝트는 MIT License로 배포됩니다. 자세한 내용은 [LICENSE](LICENSE)를 확인하세요.
@@ -358,17 +344,6 @@ python3 -m pip install -r requirements.txt
 - **이메일**: hello@juwonpark.me
 - **GitHub**: [@juwonparkme](https://github.com/juwonparkme)
 - **웹사이트**: [juwonpark.me](https://juwonpark.me)
-
----
-
-## 🙏 감사의 말
-
-- Selenium 프로젝트와 Chrome WebDriver 생태계
-- PyQt6 데스크톱 UI 생태계
-- PyInstaller 패키징 도구
-- 공개 접근 도서와 Open Access 자료를 제공하는 저자 및 기관
-
----
 
 <div align="center">
 
@@ -414,10 +389,8 @@ python3 -m pip install -r requirements.txt
 - [Project Structure](#-project-structure)
 - [Feature Details](#-feature-details)
 - [Troubleshooting](#-troubleshooting)
-- [Contributing](#-contributing)
 - [License](#-license)
 - [Contact](#-contact)
-- [Acknowledgements](#-acknowledgements)
 
 ---
 
@@ -718,18 +691,6 @@ python3 -m pip install -r requirements.txt
 2. Use `--no-dry-run` when you want actual downloads.
 3. Inspect `decision.reason` in the result JSON.
 
----
-
-## 🤝 Contributing
-
-1. Fork the Project
-2. Create your Feature Branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your Changes (`git commit -m 'feat: add amazing feature'`)
-4. Push to the Branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
-
----
-
 ## 📄 License
 
 This project is distributed under the MIT License. See [LICENSE](LICENSE) for details.
@@ -742,17 +703,6 @@ This project is distributed under the MIT License. See [LICENSE](LICENSE) for de
 - **Email**: hello@juwonpark.me
 - **GitHub**: [@juwonparkme](https://github.com/juwonparkme)
 - **Website**: [juwonpark.me](https://juwonpark.me)
-
----
-
-## 🙏 Acknowledgements
-
-- Selenium and the Chrome WebDriver ecosystem
-- PyQt6 desktop UI ecosystem
-- PyInstaller packaging tooling
-- Authors and institutions that provide public access books and Open Access materials
-
----
 
 <div align="center">
 
